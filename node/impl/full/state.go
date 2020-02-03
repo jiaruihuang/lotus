@@ -108,7 +108,7 @@ func (a *StateAPI) StatePledgeCollateral(ctx context.Context, ts *types.TipSet) 
 	return types.BigFromBytes(ret.Return), nil
 }
 
-func (a *StateAPI) StateCall(ctx context.Context, msg *types.Message, ts *types.TipSet) (*types.MessageReceipt, error) {
+func (a *StateAPI) StateCall(ctx context.Context, msg *types.Message, ts *types.TipSet) (*api.MethodCall, error) {
 	return a.StateManager.Call(ctx, msg, ts)
 }
 
@@ -399,4 +399,8 @@ func (a *StateAPI) StateListMessages(ctx context.Context, match *types.Message, 
 	}
 
 	return out, nil
+}
+
+func (a *StateAPI) StateCompute(ctx context.Context, height uint64, msgs []*types.Message, ts *types.TipSet) (cid.Cid, error) {
+	return stmgr.ComputeState(ctx, a.StateManager, height, msgs, ts)
 }

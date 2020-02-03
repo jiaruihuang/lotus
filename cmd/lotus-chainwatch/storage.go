@@ -2,16 +2,18 @@ package main
 
 import (
 	"database/sql"
+	"encoding/hex"
 	"fmt"
-	"github.com/filecoin-project/lotus/api"
-	"golang.org/x/xerrors"
 	"sync"
 	"time"
 
+	"github.com/filecoin-project/go-address"
 	"github.com/ipfs/go-cid"
 	_ "github.com/lib/pq"
+	"golang.org/x/xerrors"
 
-	"github.com/filecoin-project/go-address"
+	"github.com/filecoin-project/lotus/api"
+	"github.com/filecoin-project/lotus/chain/actors"
 	"github.com/filecoin-project/lotus/chain/types"
 )
 
@@ -75,12 +77,21 @@ create table if not exists blocks
 	eprof bytea,
 	prand bytea,
 	ep0partial bytea,
-	ep0sector bigint not null,
-	ep0challangei bigint not null
+	ep0sector numeric not null,
+	ep0challangei numeric not null
 );
 
 create unique index if not exists block_cid_uindex
 	on blocks (cid);
+
+create materialized view if not exists state_heights
+    as select distinct height, parentstateroot from blocks;
+
+create unique index if not exists state_heights_uindex
+	on state_heights (height);
+
+create index if not exists state_heights_height_index
+	on state_heights (parentstateroot);
 
 create table if not exists id_address_map
 (
@@ -117,6 +128,38 @@ create index if not exists id_address_map_address_index
 create index if not exists id_address_map_id_index
 	on id_address_map (id);
 
+create or replace function actor_tips(epoch bigint)
+    returns table (id text,
+                    code text,
+                    head text,
+                    nonce int,
+                    balance text,
+                    stateroot text,
+                    height bigint,
+                    parentstateroot text) as
+$body$
+    select distinct on (id) * from actors
+        inner join state_heights sh on sh.parentstateroot = stateroot
+        where height < $1
+		order by id, height desc;
+$body$ language sql;
+
+create table if not exists actor_states
+(
+	head text not null,
+	code text not null,
+	state json not null
+);
+
+create unique index if not exists actor_states_head_code_uindex
+	on actor_states (head, code);
+
+create index if not exists actor_states_head_index
+	on actor_states (head);
+
+create index if not exists actor_states_code_head_index
+	on actor_states (head, code);
+
 create table if not exists messages
 (
 	cid text not null
@@ -124,11 +167,11 @@ create table if not exists messages
 			primary key,
 	"from" text not null,
 	"to" text not null,
-	nonce int not null,
+	nonce bigint not null,
 	value text not null,
-	gasprice int not null,
-	gaslimit int not null,
-	method int,
+	gasprice bigint not null,
+	gaslimit bigint not null,
+	method bigint,
 	params bytea
 );
 
@@ -184,13 +227,111 @@ create table if not exists miner_heads
 	worker text not null,
 	peerid text not null,
 	sectorsize bigint not null,
-	power bigint not null,
+	power decimal not null,
 	active bool,
 	ppe bigint not null,
 	slashed_at bigint not null,
 	constraint miner_heads_pk
 		primary key (head, addr)
 );
+
+create or replace function miner_tips(epoch bigint)
+    returns table (head text,
+                   addr text,
+                   stateroot text,
+                   sectorset text,
+                   setsize decimal,
+                   provingset text,
+                   provingsize decimal,
+                   owner text,
+                   worker text,
+                   peerid text,
+                   sectorsize bigint,
+                   power decimal,
+                   active bool,
+                   ppe bigint,
+                   slashed_at bigint,
+                   height bigint,
+                   parentstateroot text) as
+    $body$
+        select distinct on (addr) * from miner_heads
+            inner join state_heights sh on sh.parentstateroot = stateroot
+            where height < $1
+            order by addr, height desc;
+    $body$ language sql;
+
+create table if not exists deals
+(
+	id int not null,
+	pieceRef text not null,
+	pieceSize bigint not null,
+	client text not null,
+	provider text not null,
+	expiration decimal not null,
+	duration decimal not null,
+	epochPrice decimal not null,
+	collateral decimal not null,
+	constraint deals_pk
+		primary key (id)
+);
+
+create index if not exists deals_client_index
+	on deals (client);
+
+create unique index if not exists deals_id_uindex
+	on deals (id);
+
+create index if not exists deals_pieceRef_index
+	on deals (pieceRef);
+
+create index if not exists deals_provider_index
+	on deals (provider);
+
+create table if not exists deal_activations
+(
+	deal bigint not null
+		constraint deal_activations_deals_id_fk
+			references deals,
+	activation_epoch bigint not null,
+	constraint deal_activations_pk
+		primary key (deal)
+);
+
+create index if not exists deal_activations_activation_epoch_index
+	on deal_activations (activation_epoch);
+
+create unique index if not exists deal_activations_deal_uindex
+	on deal_activations (deal);
+
+create table if not exists blocks_challenges
+(
+	block text not null
+		constraint blocks_challenges_pk_2
+			primary key
+		constraint blocks_challenges_blocks_cid_fk
+			references blocks,
+	index bigint not null,
+	sector_id bigint not null,
+	partial bytea not null,
+	candidate bigint not null,
+	constraint blocks_challenges_pk
+		unique (block, index)
+);
+
+create index if not exists blocks_challenges_block_index
+	on blocks_challenges (block);
+
+create index if not exists blocks_challenges_block_candidate_index
+	on blocks_challenges (block,candidate);
+
+create index if not exists blocks_challenges_block_index_index
+	on blocks_challenges (block, index);
+
+create index if not exists blocks_challenges_candidate_index
+	on blocks_challenges (candidate);
+
+create index if not exists blocks_challenges_index_index
+	on blocks_challenges (index);
 
 `)
 	if err != nil {
@@ -226,17 +367,15 @@ func (st *storage) hasList() map[cid.Cid]struct{} {
 	return out
 }
 
-func (st *storage) storeActors(actors map[address.Address]map[types.Actor]cid.Cid) error {
+func (st *storage) storeActors(actors map[address.Address]map[types.Actor]actorInfo) error {
+	// Basic
 	tx, err := st.db.Begin()
 	if err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`
-
-create temp table a (like actors excluding constraints) on commit drop;
-
-
-`); err != nil {
+		create temp table a (like actors excluding constraints) on commit drop;
+	`); err != nil {
 		return xerrors.Errorf("prep temp: %w", err)
 	}
 
@@ -247,7 +386,7 @@ create temp table a (like actors excluding constraints) on commit drop;
 
 	for addr, acts := range actors {
 		for act, st := range acts {
-			if _, err := stmt.Exec(addr.String(), act.Code.String(), act.Head.String(), act.Nonce, act.Balance.String(), st.String()); err != nil {
+			if _, err := stmt.Exec(addr.String(), act.Code.String(), act.Head.String(), act.Nonce, act.Balance.String(), st.stateroot.String()); err != nil {
 				return err
 			}
 		}
@@ -261,7 +400,47 @@ create temp table a (like actors excluding constraints) on commit drop;
 		return xerrors.Errorf("actor put: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// States
+	tx, err = st.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		create temp table a (like actor_states excluding constraints) on commit drop;
+	`); err != nil {
+		return xerrors.Errorf("prep temp: %w", err)
+	}
+
+	stmt, err = tx.Prepare(`copy a (head, code, state) from stdin `)
+	if err != nil {
+		return err
+	}
+
+	for _, acts := range actors {
+		for act, st := range acts {
+			if _, err := stmt.Exec(act.Head.String(), act.Code.String(), st.state); err != nil {
+				return err
+			}
+		}
+	}
+
+	if err := stmt.Close(); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`insert into actor_states select * from a on conflict do nothing `); err != nil {
+		return xerrors.Errorf("actor put: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (st *storage) storeMiners(miners map[minerKey]*minerInfo) error {
@@ -329,6 +508,7 @@ func (st *storage) storeHeaders(bhs map[cid.Cid]*types.BlockHeader, sync bool) e
 create temp table tbp (like block_parents excluding constraints) on commit drop;
 create temp table bs (like blocks_synced excluding constraints) on commit drop;
 create temp table b (like blocks excluding constraints) on commit drop;
+create temp table c (like blocks_challenges excluding constraints) on commit drop;
 
 
 `); err != nil {
@@ -379,7 +559,7 @@ create temp table b (like blocks excluding constraints) on commit drop;
 		}
 	}
 
-	stmt2, err := tx.Prepare(`copy b (cid, parentWeight, parentStateRoot, height, miner, "timestamp", vrfproof, tickets, eprof, prand, ep0partial, ep0sector, ep0challangei) from stdin `)
+	stmt2, err := tx.Prepare(`copy b (cid, parentWeight, parentStateRoot, height, miner, "timestamp", vrfproof, tickets, eprof, prand, ep0partial, ep0sector, ep0challangei) from stdin`)
 	if err != nil {
 		return err
 	}
@@ -416,10 +596,36 @@ create temp table b (like blocks excluding constraints) on commit drop;
 		return xerrors.Errorf("blk put: %w", err)
 	}
 
+	stmt3, err := tx.Prepare(`copy c (block, index, sector_id, partial, candidate) from stdin`)
+	if err != nil {
+		return xerrors.Errorf("s3 create: %w", err)
+	}
+	for _, bh := range bhs {
+		for index, c := range bh.EPostProof.Candidates {
+			if _, err := stmt3.Exec(
+				bh.Cid().String(),
+				index,
+				c.SectorID,
+				c.Partial,
+				c.ChallengeIndex); err != nil {
+				log.Error(err)
+			}
+		}
+	}
+
+	if err := stmt3.Close(); err != nil {
+		return xerrors.Errorf("s2 close: %w", err)
+	}
+
+	if _, err := tx.Exec(`insert into blocks_challenges select * from c on conflict do nothing `); err != nil {
+		return xerrors.Errorf("blk put: %w", err)
+	}
+
 	err = tx.Commit()
 	if err != nil {
 		return xerrors.Errorf("commit: %w", err)
 	}
+
 	return nil
 }
 
@@ -602,11 +808,8 @@ func (st *storage) storeMpoolInclusions(msgs []api.MpoolUpdate) error {
 	}
 
 	if _, err := tx.Exec(`
-
-create temp table mi (like mpool_messages excluding constraints) on commit drop;
-
-
-`); err != nil {
+		create temp table mi (like mpool_messages excluding constraints) on commit drop;
+	`); err != nil {
 		return xerrors.Errorf("prep temp: %w", err)
 	}
 
@@ -637,6 +840,112 @@ create temp table mi (like mpool_messages excluding constraints) on commit drop;
 	}
 
 	return tx.Commit()
+}
+
+func (st *storage) storeDeals(deals map[string]actors.OnChainDeal) error {
+	tx, err := st.db.Begin()
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`
+		create temp table d (like deals excluding constraints) on commit drop;
+	`); err != nil {
+		return xerrors.Errorf("prep temp: %w", err)
+	}
+
+	stmt, err := tx.Prepare(`copy d (id, pieceref, piecesize, client, "provider", expiration, duration, epochprice, collateral) from stdin `)
+	if err != nil {
+		return err
+	}
+
+	var bloat uint64
+
+	for id, deal := range deals {
+		if len(deal.PieceRef) > 40 {
+			bloat += uint64(len(deal.PieceRef))
+			continue
+		}
+		if _, err := stmt.Exec(
+			id,
+			hex.EncodeToString(deal.PieceRef),
+			deal.PieceSize,
+			deal.Client.String(),
+			deal.Provider.String(),
+			fmt.Sprint(deal.ProposalExpiration),
+			fmt.Sprint(deal.Duration),
+			deal.StoragePricePerEpoch.String(),
+			deal.StorageCollateral.String(),
+		); err != nil {
+			return err
+		}
+	}
+	if bloat > 0 {
+		log.Warnf("deal PieceRefs had %d bytes of garbage", bloat)
+	}
+
+	if err := stmt.Close(); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`insert into deals select * from d on conflict do nothing `); err != nil {
+		return xerrors.Errorf("actor put: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Activations
+
+	tx, err = st.db.Begin()
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`
+		create temp table d (like deal_activations excluding constraints) on commit drop;
+	`); err != nil {
+		return xerrors.Errorf("prep temp: %w", err)
+	}
+
+	stmt, err = tx.Prepare(`copy d (deal, activation_epoch) from stdin `)
+	if err != nil {
+		return err
+	}
+
+	for id, deal := range deals {
+		if deal.ActivationEpoch == 0 {
+			continue
+		}
+		if _, err := stmt.Exec(
+			id,
+			deal.ActivationEpoch,
+		); err != nil {
+			return err
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`insert into deal_activations select * from d on conflict do nothing `); err != nil {
+		return xerrors.Errorf("actor put: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (st *storage) refreshViews() error {
+	if _, err := st.db.Exec(`refresh materialized view state_heights`); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (st *storage) close() error {

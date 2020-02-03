@@ -22,8 +22,6 @@ import (
 	"golang.org/x/xerrors"
 )
 
-const MaxSectors = 1 << 48
-
 type StorageMinerActor struct{}
 
 type StorageMinerActorState struct {
@@ -571,7 +569,7 @@ func SectorIsUnique(ctx context.Context, s types.Storage, sroot cid.Cid, sid uin
 }
 
 func AddToSectorSet(ctx context.Context, blks amt.Blocks, ss cid.Cid, sectorID uint64, commR, commD []byte) (cid.Cid, ActorError) {
-	if sectorID >= MaxSectors {
+	if sectorID >= build.MinerMaxSectors {
 		return cid.Undef, aerrors.Newf(25, "sector ID out of range: %d", sectorID)
 	}
 	ssr, err := amt.LoadAMT(blks, ss)
@@ -594,7 +592,7 @@ func AddToSectorSet(ctx context.Context, blks amt.Blocks, ss cid.Cid, sectorID u
 }
 
 func GetFromSectorSet(ctx context.Context, s types.Storage, ss cid.Cid, sectorID uint64) (bool, []byte, []byte, ActorError) {
-	if sectorID >= MaxSectors {
+	if sectorID >= build.MinerMaxSectors {
 		return false, nil, nil, aerrors.Newf(25, "sector ID out of range: %d", sectorID)
 	}
 

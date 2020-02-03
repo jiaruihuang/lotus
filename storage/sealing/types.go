@@ -1,15 +1,10 @@
-package storage
+package sealing
 
 import (
-	"context"
-
 	sectorbuilder "github.com/filecoin-project/go-sectorbuilder"
-	"github.com/ipfs/go-cid"
-
 	"github.com/filecoin-project/lotus/api"
+	"github.com/ipfs/go-cid"
 )
-
-type TicketFn func(context.Context) (*sectorbuilder.SealTicket, error)
 
 type SealTicket struct {
 	BlockHeight uint64
@@ -33,6 +28,10 @@ func (t *SealSeed) SB() sectorbuilder.SealSeed {
 	return out
 }
 
+func (t *SealSeed) Equals(o *SealSeed) bool {
+	return string(t.TicketBytes) == string(o.TicketBytes) && t.BlockHeight == o.BlockHeight
+}
+
 type Piece struct {
 	DealID uint64
 
@@ -46,10 +45,20 @@ func (p *Piece) ppi() (out sectorbuilder.PublicPieceInfo) {
 	return out
 }
 
+type Log struct {
+	Timestamp uint64
+	Trace     string // for errors
+
+	Message string
+
+	// additional data (Event info)
+	Kind string
+}
+
 type SectorInfo struct {
 	State    api.SectorState
 	SectorID uint64
-	Nonce    uint64
+	Nonce    uint64 // TODO: remove
 
 	// Packing
 
@@ -63,7 +72,7 @@ type SectorInfo struct {
 
 	PreCommitMessage *cid.Cid
 
-	// PreCommitted
+	// WaitSeed
 	Seed SealSeed
 
 	// Committing
@@ -74,10 +83,8 @@ type SectorInfo struct {
 
 	// Debug
 	LastErr string
-}
 
-func (t *SectorInfo) upd() *sectorUpdate {
-	return &sectorUpdate{id: t.SectorID, nonce: t.Nonce}
+	Log []Log
 }
 
 func (t *SectorInfo) pieceInfos() []sectorbuilder.PublicPieceInfo {

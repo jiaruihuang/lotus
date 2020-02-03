@@ -28,12 +28,8 @@ func TestAppendCIDsToWindow(t *testing.T) {
 
 func TestCheckWindow(t *testing.T) {
 	assert := assert.New(t)
-	ch := make(chan CidWindow, 1)
-	och := make(chan bool, 1)
 	threshold := 3
-	go func() {
-		och <- checkWindow(ch, threshold)
-	}()
+
 	var healthyHeadCheckWindow CidWindow
 	healthyHeadCheckWindow = appendCIDsToWindow(healthyHeadCheckWindow, []cid.Cid{
 		makeCID("abcd"),
@@ -46,14 +42,79 @@ func TestCheckWindow(t *testing.T) {
 		makeCID("bbcd"),
 		makeCID("bbfe"),
 	}, threshold)
-	ch <- healthyHeadCheckWindow
-	select {
-	case ok := <-och:
-		assert.True(ok)
-	}
-	go func() {
-		och <- checkWindow(ch, threshold)
-	}()
+	ok := checkWindow(healthyHeadCheckWindow, threshold)
+	assert.True(ok)
+
+	var healthyHeadCheckWindow1 CidWindow
+	healthyHeadCheckWindow1 = appendCIDsToWindow(healthyHeadCheckWindow1, []cid.Cid{
+		makeCID("bbcd"),
+		makeCID("bbfe"),
+	}, threshold)
+	healthyHeadCheckWindow1 = appendCIDsToWindow(healthyHeadCheckWindow1, []cid.Cid{
+		makeCID("bbcd"),
+		makeCID("bbfe"),
+		makeCID("abcd"),
+	}, threshold)
+	healthyHeadCheckWindow1 = appendCIDsToWindow(healthyHeadCheckWindow1, []cid.Cid{
+		makeCID("abcd"),
+	}, threshold)
+	ok = checkWindow(healthyHeadCheckWindow1, threshold)
+	assert.True(ok)
+
+	var healthyHeadCheckWindow2 CidWindow
+	healthyHeadCheckWindow2 = appendCIDsToWindow(healthyHeadCheckWindow2, []cid.Cid{
+		makeCID("bbcd"),
+		makeCID("bbfe"),
+	}, threshold)
+	healthyHeadCheckWindow2 = appendCIDsToWindow(healthyHeadCheckWindow2, []cid.Cid{
+		makeCID("abcd"),
+	}, threshold)
+	ok = checkWindow(healthyHeadCheckWindow2, threshold)
+	assert.True(ok)
+
+	var healthyHeadCheckWindow3 CidWindow
+	healthyHeadCheckWindow3 = appendCIDsToWindow(healthyHeadCheckWindow3, []cid.Cid{
+		makeCID("abcd"),
+	}, threshold)
+	healthyHeadCheckWindow3 = appendCIDsToWindow(healthyHeadCheckWindow3, []cid.Cid{
+		makeCID("bbcd"),
+		makeCID("bbfe"),
+	}, threshold)
+	ok = checkWindow(healthyHeadCheckWindow3, threshold)
+	assert.True(ok)
+
+	var healthyHeadCheckWindow4 CidWindow
+	healthyHeadCheckWindow4 = appendCIDsToWindow(healthyHeadCheckWindow4, []cid.Cid{
+		makeCID("bbcd"),
+		makeCID("bbfe"),
+	}, threshold)
+	ok = checkWindow(healthyHeadCheckWindow4, threshold)
+	assert.True(ok)
+
+	var healthyHeadCheckWindow5 CidWindow
+	healthyHeadCheckWindow5 = appendCIDsToWindow(healthyHeadCheckWindow5, []cid.Cid{
+		makeCID("bbcd"),
+		makeCID("bbfe"),
+		makeCID("bbff"),
+	}, 5)
+	healthyHeadCheckWindow5 = appendCIDsToWindow(healthyHeadCheckWindow5, []cid.Cid{
+		makeCID("bbcd"),
+		makeCID("bbfe"),
+	}, 5)
+	healthyHeadCheckWindow5 = appendCIDsToWindow(healthyHeadCheckWindow5, []cid.Cid{
+		makeCID("abcd"),
+	}, 5)
+	healthyHeadCheckWindow5 = appendCIDsToWindow(healthyHeadCheckWindow5, []cid.Cid{
+		makeCID("cbcd"),
+		makeCID("cbfe"),
+	}, 5)
+	healthyHeadCheckWindow5 = appendCIDsToWindow(healthyHeadCheckWindow5, []cid.Cid{
+		makeCID("cbcd"),
+		makeCID("cbfe"),
+	}, 5)
+	ok = checkWindow(healthyHeadCheckWindow5, threshold)
+	assert.True(ok)
+
 	var unhealthyHeadCheckWindow CidWindow
 	unhealthyHeadCheckWindow = appendCIDsToWindow(unhealthyHeadCheckWindow, []cid.Cid{
 		makeCID("abcd"),
@@ -67,12 +128,33 @@ func TestCheckWindow(t *testing.T) {
 		makeCID("abcd"),
 		makeCID("fbcd"),
 	}, threshold)
-	ch <- unhealthyHeadCheckWindow
-	select {
-	case ok := <-och:
-		assert.False(ok)
-	}
+	ok = checkWindow(unhealthyHeadCheckWindow, threshold)
+	assert.False(ok)
 
+	var unhealthyHeadCheckWindow1 CidWindow
+	unhealthyHeadCheckWindow1 = appendCIDsToWindow(unhealthyHeadCheckWindow1, []cid.Cid{
+		makeCID("abcd"),
+		makeCID("fbcd"),
+	}, threshold)
+	unhealthyHeadCheckWindow1 = appendCIDsToWindow(unhealthyHeadCheckWindow1, []cid.Cid{
+		makeCID("abcd"),
+		makeCID("fbcd"),
+	}, threshold)
+	ok = checkWindow(unhealthyHeadCheckWindow1, threshold)
+	assert.True(ok)
+
+	var unhealthyHeadCheckWindow2 CidWindow
+	unhealthyHeadCheckWindow2 = appendCIDsToWindow(unhealthyHeadCheckWindow2, []cid.Cid{
+		makeCID("abcd"),
+	}, threshold)
+	unhealthyHeadCheckWindow2 = appendCIDsToWindow(unhealthyHeadCheckWindow2, []cid.Cid{
+		makeCID("abcd"),
+	}, threshold)
+	unhealthyHeadCheckWindow2 = appendCIDsToWindow(unhealthyHeadCheckWindow2, []cid.Cid{
+		makeCID("abcd"),
+	}, threshold)
+	ok = checkWindow(unhealthyHeadCheckWindow2, threshold)
+	assert.False(ok)
 }
 
 func makeCID(s string) cid.Cid {

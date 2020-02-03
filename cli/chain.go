@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"gopkg.in/urfave/cli.v2"
 
 	"github.com/filecoin-project/lotus/api"
+	"github.com/filecoin-project/lotus/chain/actors"
 	types "github.com/filecoin-project/lotus/chain/types"
 )
 
@@ -26,6 +28,8 @@ var chainCmd = &cli.Command{
 		chainSetHeadCmd,
 		chainListCmd,
 		chainGetCmd,
+		chainExportCmd,
+		slashConsensusFault,
 	},
 }
 
@@ -172,6 +176,10 @@ var chainGetMsgCmd = &cli.Command{
 	Name:  "getmessage",
 	Usage: "Get and print a message by its cid",
 	Action: func(cctx *cli.Context) error {
+		if !cctx.Args().Present() {
+			return fmt.Errorf("must pass a cid of a message to get")
+		}
+
 		api, closer, err := GetFullNodeAPI(cctx)
 		if err != nil {
 			return err
@@ -380,8 +388,125 @@ func printTipSet(format string, ts *types.TipSet) {
 		blks += fmt.Sprintf("%s: %s,", b.Cid(), b.Miner)
 	}
 	blks += " ]"
+
+	sCids := make([]string, 0, len(blks))
+
+	for _, c := range ts.Cids() {
+		sCids = append(sCids, c.String())
+	}
+
+	format = strings.ReplaceAll(format, "<tipset>", strings.Join(sCids, ","))
 	format = strings.ReplaceAll(format, "<blocks>", blks)
 	format = strings.ReplaceAll(format, "<weight>", fmt.Sprint(ts.Blocks()[0].ParentWeight))
 
 	fmt.Println(format)
+}
+
+var chainExportCmd = &cli.Command{
+	Name:  "export",
+	Usage: "export chain to a car file",
+	Flags: []cli.Flag{
+		&cli.StringFlag{
+			Name: "tipset",
+		},
+	},
+	Action: func(cctx *cli.Context) error {
+		api, closer, err := GetFullNodeAPI(cctx)
+		if err != nil {
+			return err
+		}
+		defer closer()
+		ctx := ReqContext(cctx)
+
+		if !cctx.Args().Present() {
+			return fmt.Errorf("must specify filename to export chain to")
+		}
+
+		fi, err := os.Create(cctx.Args().First())
+		if err != nil {
+			return err
+		}
+		defer fi.Close()
+
+		ts, err := loadTipSet(ctx, cctx, api)
+		if err != nil {
+			return err
+		}
+
+		stream, err := api.ChainExport(ctx, ts)
+		if err != nil {
+			return err
+		}
+
+		for b := range stream {
+			_, err := fi.Write(b)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	},
+}
+
+var slashConsensusFault = &cli.Command{
+	Name:  "slash-consensus",
+	Usage: "Report consensus fault",
+	Action: func(cctx *cli.Context) error {
+		api, closer, err := GetFullNodeAPI(cctx)
+		if err != nil {
+			return err
+		}
+		defer closer()
+		ctx := ReqContext(cctx)
+
+		c1, err := cid.Parse(cctx.Args().Get(0))
+		if err != nil {
+			return xerrors.Errorf("parsing cid 1: %w", err)
+		}
+
+		b1, err := api.ChainGetBlock(ctx, c1)
+		if err != nil {
+			return xerrors.Errorf("getting block 1: %w", err)
+		}
+
+		c2, err := cid.Parse(cctx.Args().Get(0))
+		if err != nil {
+			return xerrors.Errorf("parsing cid 2: %w", err)
+		}
+
+		b2, err := api.ChainGetBlock(ctx, c2)
+		if err != nil {
+			return xerrors.Errorf("getting block 2: %w", err)
+		}
+
+		def, err := api.WalletDefaultAddress(ctx)
+		if err != nil {
+			return err
+		}
+
+		params, err := actors.SerializeParams(&actors.ArbitrateConsensusFaultParams{
+			Block1: b1,
+			Block2: b2,
+		})
+
+		msg := &types.Message{
+			To:       actors.StoragePowerAddress,
+			From:     def,
+			Value:    types.NewInt(0),
+			GasPrice: types.NewInt(1),
+			GasLimit: types.NewInt(10000000),
+			Method:   actors.SPAMethods.ArbitrateConsensusFault,
+			Params:   params,
+		}
+
+		smsg, err := api.MpoolPushMessage(ctx, msg)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println(smsg.Cid())
+
+		return nil
+	},
 }

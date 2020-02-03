@@ -5,14 +5,21 @@ package main
 import (
 	"context"
 	"io/ioutil"
+	"os"
+	"runtime/pprof"
 
 	paramfetch "github.com/filecoin-project/go-paramfetch"
+	"github.com/filecoin-project/go-sectorbuilder"
+	blockstore "github.com/ipfs/go-ipfs-blockstore"
 	"github.com/multiformats/go-multiaddr"
 	"golang.org/x/xerrors"
 	"gopkg.in/urfave/cli.v2"
 
 	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/build"
+	"github.com/filecoin-project/lotus/chain/stmgr"
+	"github.com/filecoin-project/lotus/chain/store"
+	"github.com/filecoin-project/lotus/chain/vm"
 	"github.com/filecoin-project/lotus/node"
 	"github.com/filecoin-project/lotus/node/modules"
 	"github.com/filecoin-project/lotus/node/modules/testing"
@@ -56,9 +63,34 @@ var DaemonCmd = &cli.Command{
 			Name:  "bootstrap",
 			Value: true,
 		},
+		&cli.StringFlag{
+			Name:  "import-chain",
+			Usage: "on first run, load chain from given file",
+		},
+		&cli.BoolFlag{
+			Name:  "halt-after-import",
+			Usage: "halt the process after importing chain from file",
+		},
+		&cli.StringFlag{
+			Name:  "pprof",
+			Usage: "specify name of file for writing cpu profile to",
+		},
 	},
 	Action: func(cctx *cli.Context) error {
+		if prof := cctx.String("pprof"); prof != "" {
+			profile, err := os.Create(prof)
+			if err != nil {
+				return err
+			}
+
+			if err := pprof.StartCPUProfile(profile); err != nil {
+				return err
+			}
+			defer pprof.StopCPUProfile()
+		}
+
 		ctx := context.Background()
+		log.Infof("lotus repo: %s", cctx.String("repo"))
 		r, err := repo.NewFS(cctx.String("repo"))
 		if err != nil {
 			return xerrors.Errorf("opening fs repo: %w", err)
@@ -68,7 +100,7 @@ var DaemonCmd = &cli.Command{
 			return xerrors.Errorf("repo init error: %w", err)
 		}
 
-		if err := paramfetch.GetParams(build.ParametersJson, 0); err != nil {
+		if err := paramfetch.GetParams(build.ParametersJson(), 0); err != nil {
 			return xerrors.Errorf("fetching proof parameters: %w", err)
 		}
 
@@ -78,6 +110,16 @@ var DaemonCmd = &cli.Command{
 			genBytes, err = ioutil.ReadFile(cctx.String("genesis"))
 			if err != nil {
 				return xerrors.Errorf("reading genesis: %w", err)
+			}
+		}
+
+		chainfile := cctx.String("import-chain")
+		if chainfile != "" {
+			if err := ImportChain(r, chainfile); err != nil {
+				return err
+			}
+			if cctx.Bool("halt-after-import") {
+				return nil
 			}
 		}
 
@@ -128,4 +170,51 @@ var DaemonCmd = &cli.Command{
 		// TODO: properly parse api endpoint (or make it a URL)
 		return serveRPC(api, stop, endpoint)
 	},
+}
+
+func ImportChain(r repo.Repo, fname string) error {
+	fi, err := os.Open(fname)
+	if err != nil {
+		return err
+	}
+
+	lr, err := r.Lock(repo.FullNode)
+	if err != nil {
+		return err
+	}
+	defer lr.Close()
+
+	ds, err := lr.Datastore("/blocks")
+	if err != nil {
+		return err
+	}
+
+	mds, err := lr.Datastore("/metadata")
+	if err != nil {
+		return err
+	}
+
+	bs := blockstore.NewBlockstore(ds)
+
+	cst := store.NewChainStore(bs, mds, vm.Syscalls(sectorbuilder.ProofVerifier))
+
+	log.Info("importing chain from file...")
+	ts, err := cst.Import(fi)
+	if err != nil {
+		return xerrors.Errorf("importing chain failed: %w", err)
+	}
+
+	stm := stmgr.NewStateManager(cst)
+
+	log.Infof("validating imported chain...")
+	if err := stm.ValidateChain(context.TODO(), ts); err != nil {
+		return xerrors.Errorf("chain validation failed: %w", err)
+	}
+
+	log.Info("accepting %s as new head", ts.Cids())
+	if err := cst.SetHead(ts); err != nil {
+		return err
+	}
+
+	return nil
 }

@@ -2,7 +2,9 @@
 
 package build
 
-import "os"
+func init() {
+	InsecurePoStValidation = true
+}
 
 var SectorSizes = []uint64{1024}
 
@@ -31,7 +33,3 @@ const InteractivePoRepConfidence = 6
 
 // Bytes
 var MinimumMinerPower uint64 = 2 << 10 // 2KiB
-
-func init() {
-	os.Setenv("TRUST_PARAMS", "1")
-}

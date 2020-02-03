@@ -1,10 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"sync"
 
 	"github.com/filecoin-project/go-address"
@@ -19,11 +21,16 @@ import (
 
 	lru "github.com/hashicorp/golang-lru"
 	block "github.com/ipfs/go-block-format"
+	"github.com/ipfs/go-blockservice"
+	car "github.com/ipfs/go-car"
 	"github.com/ipfs/go-cid"
 	dstore "github.com/ipfs/go-datastore"
 	hamt "github.com/ipfs/go-hamt-ipld"
+	blockstore "github.com/ipfs/go-ipfs-blockstore"
 	bstore "github.com/ipfs/go-ipfs-blockstore"
+	format "github.com/ipfs/go-ipld-format"
 	logging "github.com/ipfs/go-log/v2"
+	dag "github.com/ipfs/go-merkledag"
 	cbg "github.com/whyrusleeping/cbor-gen"
 	pubsub "github.com/whyrusleeping/pubsub"
 	"golang.org/x/xerrors"
@@ -730,6 +737,30 @@ func (cs *ChainStore) readMsgMetaCids(mmc cid.Cid) ([]cid.Cid, []cid.Cid, error)
 	return blscids, secpkcids, nil
 }
 
+func (cs *ChainStore) GetPath(ctx context.Context, from types.TipSetKey, to types.TipSetKey) ([]*HeadChange, error) {
+	fts, err := cs.LoadTipSet(from)
+	if err != nil {
+		return nil, xerrors.Errorf("loading from tipset %s: %w", from, err)
+	}
+	tts, err := cs.LoadTipSet(to)
+	if err != nil {
+		return nil, xerrors.Errorf("loading to tipset %s: %w", to, err)
+	}
+	revert, apply, err := cs.ReorgOps(fts, tts)
+	if err != nil {
+		return nil, xerrors.Errorf("error getting tipset branches: %w", err)
+	}
+
+	path := make([]*HeadChange, len(revert)+len(apply))
+	for i, r := range revert {
+		path[i] = &HeadChange{Type: HCRevert, Val: r}
+	}
+	for j, i := 0, len(apply)-1; i >= 0; j, i = j+1, i-1 {
+		path[j+len(revert)] = &HeadChange{Type: HCApply, Val: apply[i]}
+	}
+	return path, nil
+}
+
 func (cs *ChainStore) MessagesForBlock(b *types.BlockHeader) ([]*types.Message, []*types.SignedMessage, error) {
 	blscids, secpkcids, err := cs.readMsgMetaCids(b.Messages)
 	if err != nil {
@@ -891,6 +922,84 @@ func (cs *ChainStore) GetTipsetByHeight(ctx context.Context, h uint64, ts *types
 
 		ts = pts
 	}
+}
+
+func recurseLinks(bs blockstore.Blockstore, root cid.Cid, in []cid.Cid) ([]cid.Cid, error) {
+	data, err := bs.Get(root)
+	if err != nil {
+		return nil, err
+	}
+
+	top, err := cbg.ScanForLinks(bytes.NewReader(data.RawData()))
+	if err != nil {
+		return nil, err
+	}
+
+	in = append(in, top...)
+	for _, c := range top {
+		var err error
+		in, err = recurseLinks(bs, c, in)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return in, nil
+}
+
+func (cs *ChainStore) Export(ctx context.Context, ts *types.TipSet, w io.Writer) error {
+	if ts == nil {
+		ts = cs.GetHeaviestTipSet()
+	}
+	bsrv := blockservice.New(cs.bs, nil)
+	dserv := dag.NewDAGService(bsrv)
+	return car.WriteCarWithWalker(ctx, dserv, ts.Cids(), w, func(nd format.Node) ([]*format.Link, error) {
+		var b types.BlockHeader
+		if err := b.UnmarshalCBOR(bytes.NewBuffer(nd.RawData())); err != nil {
+			return nil, err
+		}
+
+		var out []*format.Link
+		for _, p := range b.Parents {
+			out = append(out, &format.Link{Cid: p})
+		}
+
+		cids, err := recurseLinks(cs.bs, b.Messages, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, c := range cids {
+			out = append(out, &format.Link{Cid: c})
+		}
+
+		if b.Height == 0 {
+			cids, err := recurseLinks(cs.bs, b.ParentStateRoot, nil)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, c := range cids {
+				out = append(out, &format.Link{Cid: c})
+			}
+		}
+
+		return out, nil
+	})
+}
+
+func (cs *ChainStore) Import(r io.Reader) (*types.TipSet, error) {
+	header, err := car.LoadCar(cs.Blockstore(), r)
+	if err != nil {
+		return nil, xerrors.Errorf("loadcar failed: %w", err)
+	}
+
+	root, err := cs.LoadTipSet(types.NewTipSetKey(header.Roots...))
+	if err != nil {
+		return nil, xerrors.Errorf("failed to load root tipset from chainfile: %w", err)
+	}
+
+	return root, nil
 }
 
 type chainRand struct {

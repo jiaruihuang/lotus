@@ -3,6 +3,7 @@ package full
 import (
 	"context"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -18,10 +19,12 @@ import (
 	"github.com/ipfs/go-path"
 	"github.com/ipfs/go-path/resolver"
 	mh "github.com/multiformats/go-multihash"
+	"github.com/prometheus/common/log"
 	"go.uber.org/fx"
 	"golang.org/x/xerrors"
 
 	"github.com/filecoin-project/go-address"
+
 	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/chain/store"
 	"github.com/filecoin-project/lotus/chain/types"
@@ -81,6 +84,10 @@ func (a *ChainAPI) ChainGetBlockMessages(ctx context.Context, msg cid.Cid) (*api
 		SecpkMessages: smsgs,
 		Cids:          cids,
 	}, nil
+}
+
+func (a *ChainAPI) ChainGetPath(ctx context.Context, from types.TipSetKey, to types.TipSetKey) ([]*store.HeadChange, error) {
+	return a.Chain.GetPath(ctx, from, to)
 }
 
 func (a *ChainAPI) ChainGetParentMessages(ctx context.Context, bcid cid.Cid) ([]api.Message, error) {
@@ -307,4 +314,35 @@ func (a *ChainAPI) ChainGetMessage(ctx context.Context, mc cid.Cid) (*types.Mess
 	}
 
 	return cm.VMMessage(), nil
+}
+
+func (a *ChainAPI) ChainExport(ctx context.Context, ts *types.TipSet) (<-chan []byte, error) {
+	r, w := io.Pipe()
+	out := make(chan []byte)
+	go func() {
+		defer w.Close()
+		if err := a.Chain.Export(ctx, ts, w); err != nil {
+			log.Errorf("chain export call failed: %s", err)
+			return
+		}
+	}()
+
+	go func() {
+		defer close(out)
+		for {
+			buf := make([]byte, 4096)
+			n, err := r.Read(buf)
+			if err != nil {
+				log.Errorf("chain export pipe read failed: %s", err)
+				return
+			}
+			select {
+			case out <- buf[:n]:
+			case <-ctx.Done():
+				log.Warnf("export writer failed: %s", ctx.Err())
+			}
+		}
+	}()
+
+	return out, nil
 }

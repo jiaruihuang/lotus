@@ -160,6 +160,16 @@ func (sm *StorageMinerAPI) SectorsStatus(ctx context.Context, sid uint64) (api.S
 		deals[i] = piece.DealID
 	}
 
+	log := make([]api.SectorLog, len(info.Log))
+	for i, l := range info.Log {
+		log[i] = api.SectorLog{
+			Kind:      l.Kind,
+			Timestamp: l.Timestamp,
+			Trace:     l.Trace,
+			Message:   l.Message,
+		}
+	}
+
 	return api.SectorInfo{
 		SectorID: sid,
 		State:    info.State,
@@ -172,6 +182,7 @@ func (sm *StorageMinerAPI) SectorsStatus(ctx context.Context, sid uint64) (api.S
 		Retries:  info.Nonce,
 
 		LastErr: info.LastErr,
+		Log:     log,
 	}, nil
 }
 
@@ -206,7 +217,7 @@ func (sm *StorageMinerAPI) SectorsRefs(context.Context) (map[string][]api.Sealed
 }
 
 func (sm *StorageMinerAPI) SectorsUpdate(ctx context.Context, id uint64, state api.SectorState) error {
-	return sm.Miner.UpdateSectorState(ctx, id, storage.NonceIncrement, state)
+	return sm.Miner.ForceSectorState(ctx, id, state)
 }
 
 func (sm *StorageMinerAPI) WorkerQueue(ctx context.Context, cfg sectorbuilder.WorkerCfg) (<-chan sectorbuilder.WorkerTask, error) {

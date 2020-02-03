@@ -1,4 +1,4 @@
-package storage
+package sealing
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"runtime"
 
 	sectorbuilder "github.com/filecoin-project/go-sectorbuilder"
 	"golang.org/x/xerrors"
@@ -14,17 +15,25 @@ import (
 	"github.com/filecoin-project/lotus/chain/types"
 )
 
-func (m *Miner) pledgeSector(ctx context.Context, sectorID uint64, existingPieceSizes []uint64, sizes ...uint64) ([]Piece, error) {
+func (m *Sealing) pledgeReader(size uint64, parts uint64) io.Reader {
+	piece := sectorbuilder.UserBytesForSectorSize((size/127 + size) / parts)
+
+	readers := make([]io.Reader, parts)
+	for i := range readers {
+		readers[i] = io.LimitReader(rand.New(rand.NewSource(42+int64(i))), int64(piece))
+	}
+
+	return io.MultiReader(readers...)
+}
+
+func (m *Sealing) pledgeSector(ctx context.Context, sectorID uint64, existingPieceSizes []uint64, sizes ...uint64) ([]Piece, error) {
 	if len(sizes) == 0 {
 		return nil, nil
 	}
 
 	deals := make([]actors.StorageDealProposal, len(sizes))
 	for i, size := range sizes {
-		release := m.sb.RateLimit()
-		commP, err := sectorbuilder.GeneratePieceCommitment(io.LimitReader(rand.New(rand.NewSource(42)), int64(size)), size)
-		release()
-
+		commP, err := m.fastPledgeCommitment(size, uint64(runtime.NumCPU()))
 		if err != nil {
 			return nil, err
 		}
@@ -81,7 +90,7 @@ func (m *Miner) pledgeSector(ctx context.Context, sectorID uint64, existingPiece
 	out := make([]Piece, len(sizes))
 
 	for i, size := range sizes {
-		ppi, err := m.sb.AddPiece(size, sectorID, io.LimitReader(rand.New(rand.NewSource(42)), int64(size)), existingPieceSizes)
+		ppi, err := m.sb.AddPiece(size, sectorID, m.pledgeReader(size, uint64(runtime.NumCPU())), existingPieceSizes)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +107,7 @@ func (m *Miner) pledgeSector(ctx context.Context, sectorID uint64, existingPiece
 	return out, nil
 }
 
-func (m *Miner) PledgeSector() error {
+func (m *Sealing) PledgeSector() error {
 	go func() {
 		ctx := context.TODO() // we can't use the context from command which invokes
 		// this, as we run everything here async, and it's cancelled when the
