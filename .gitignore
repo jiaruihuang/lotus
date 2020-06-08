@@ -3,6 +3,7 @@
 /lotus-seal-worker
 /lotus-seed
 /lotus-health
+/lotus-shed
 /pond
 /townhall
 /fountain
@@ -14,7 +15,6 @@
 /cmd/lotus-townhall/townhall/node_modules
 /cmd/lotus-townhall/townhall/build
 extern/filecoin-ffi/rust/target
-**/*.h
 **/*.a
 **/*.pc
 /**/*/.DS_STORE
@@ -26,6 +26,9 @@ build/paramfetch.sh
 /blocks.svg
 /chainwatch
 /chainwatch.db
+/bundle
+/darwin
+/linux
 
 *-fuzz.zip
 /chain/types/work_msg/

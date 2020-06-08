@@ -3,20 +3,24 @@ package modules
 import (
 	"context"
 	"crypto/rand"
-	"github.com/filecoin-project/lotus/api/apistruct"
+	"errors"
 	"io"
 	"io/ioutil"
 
-	"github.com/filecoin-project/lotus/build"
-	"github.com/filecoin-project/lotus/chain/types"
-	"github.com/filecoin-project/lotus/lib/addrutil"
-	"github.com/filecoin-project/lotus/node/modules/dtypes"
-	"github.com/filecoin-project/lotus/node/repo"
 	"github.com/gbrlsnchs/jwt/v3"
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	record "github.com/libp2p/go-libp2p-record"
 	"golang.org/x/xerrors"
+
+	"github.com/filecoin-project/go-jsonrpc/auth"
+
+	"github.com/filecoin-project/lotus/api/apistruct"
+	"github.com/filecoin-project/lotus/build"
+	"github.com/filecoin-project/lotus/chain/types"
+	"github.com/filecoin-project/lotus/lib/addrutil"
+	"github.com/filecoin-project/lotus/node/modules/dtypes"
+	"github.com/filecoin-project/lotus/node/repo"
 )
 
 var log = logging.Logger("modules")
@@ -33,12 +37,13 @@ func RecordValidator(ps peerstore.Peerstore) record.Validator {
 const JWTSecretName = "auth-jwt-private"
 
 type jwtPayload struct {
-	Allow []string
+	Allow []auth.Permission
 }
 
 func APISecret(keystore types.KeyStore, lr repo.LockedRepo) (*dtypes.APIAlg, error) {
 	key, err := keystore.Get(JWTSecretName)
-	if err != nil {
+
+	if errors.Is(err, types.ErrKeyInfoNotFound) {
 		log.Warn("Generating new API secret")
 
 		sk, err := ioutil.ReadAll(io.LimitReader(rand.Reader, 32))
@@ -68,6 +73,8 @@ func APISecret(keystore types.KeyStore, lr repo.LockedRepo) (*dtypes.APIAlg, err
 		if err := lr.SetAPIToken(cliToken); err != nil {
 			return nil, err
 		}
+	} else if err != nil {
+		return nil, xerrors.Errorf("could not get JWT Token: %w", err)
 	}
 
 	return (*dtypes.APIAlg)(jwt.NewHS256(key.PrivateKey)), nil

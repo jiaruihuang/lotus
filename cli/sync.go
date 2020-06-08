@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/filecoin-project/specs-actors/actors/abi"
 	cid "github.com/ipfs/go-cid"
 	"gopkg.in/urfave/cli.v2"
 
@@ -20,6 +21,7 @@ var syncCmd = &cli.Command{
 		syncStatusCmd,
 		syncWaitCmd,
 		syncMarkBadCmd,
+		syncCheckBadCmd,
 	},
 }
 
@@ -44,7 +46,7 @@ var syncStatusCmd = &cli.Command{
 			fmt.Printf("worker %d:\n", i)
 			var base, target []cid.Cid
 			var heightDiff int64
-			var theight uint64
+			var theight abi.ChainEpoch
 			if ss.Base != nil {
 				base = ss.Base.Cids()
 				heightDiff = int64(ss.Base.Height())
@@ -92,8 +94,9 @@ var syncWaitCmd = &cli.Command{
 }
 
 var syncMarkBadCmd = &cli.Command{
-	Name:  "mark-bad",
-	Usage: "Mark the given block as bad, will prevent syncing to a chain that contains it",
+	Name:      "mark-bad",
+	Usage:     "Mark the given block as bad, will prevent syncing to a chain that contains it",
+	ArgsUsage: "[blockCid]",
 	Action: func(cctx *cli.Context) error {
 		napi, closer, err := GetFullNodeAPI(cctx)
 		if err != nil {
@@ -112,6 +115,42 @@ var syncMarkBadCmd = &cli.Command{
 		}
 
 		return napi.SyncMarkBad(ctx, bcid)
+	},
+}
+
+var syncCheckBadCmd = &cli.Command{
+	Name:      "check-bad",
+	Usage:     "check if the given block was marked bad, and for what reason",
+	ArgsUsage: "[blockCid]",
+	Action: func(cctx *cli.Context) error {
+		napi, closer, err := GetFullNodeAPI(cctx)
+		if err != nil {
+			return err
+		}
+		defer closer()
+		ctx := ReqContext(cctx)
+
+		if !cctx.Args().Present() {
+			return fmt.Errorf("must specify block cid to check")
+		}
+
+		bcid, err := cid.Decode(cctx.Args().First())
+		if err != nil {
+			return fmt.Errorf("failed to decode input as a cid: %s", err)
+		}
+
+		reason, err := napi.SyncCheckBad(ctx, bcid)
+		if err != nil {
+			return err
+		}
+
+		if reason == "" {
+			fmt.Println("block was not marked as bad")
+			return nil
+		}
+
+		fmt.Println(reason)
+		return nil
 	},
 }
 

@@ -14,15 +14,21 @@ IPFS_GATEWAY="https://proof-parameters.s3.cn-south-1.jdcloud-oss.com/ipfs/"
 
 ## Get started
 
-Please ensure that at least one **BLS address** in your wallet exists with the following command:
+Please ensure that at least one **BLS address** (starts with `t3`) in your wallet exists with the following command:
 
 ```sh
 lotus wallet list
 ```
 
+If you do not have a bls address, create a new bls wallet:
+
+```sh
+lotus wallet new bls
+```
+
 With your wallet address:
 
-- Visit the [faucet](https://lotus-faucet.kittyhawk.wtf/miner.html)
+- Visit the [faucet](https://faucet.testnet.filecoin.io)
 - Click "Create Miner"
 - DO NOT REFRESH THE PAGE. THIS OPERATION CAN TAKE SOME TIME.
 
@@ -68,7 +74,7 @@ lotus-storage-miner info
 **Seal** random data to start producing **PoSts**:
 
 ```sh
-lotus-storage-miner pledge-sector
+lotus-storage-miner sectors pledge
 ```
 
 - Warning: On Linux configurations, this command will write data to `$TMPDIR` which is not usually the largest partition. You should point the value to a larger partition if possible.
@@ -84,11 +90,12 @@ lotus-storage-miner state power <miner>
 lotus-storage-miner state sectors <miner>
 ```
 
-## Change nickname
+## Performance tuning
 
-Update `~/.lotus/config.toml` with:
+### `FIL_PROOFS_MAXIMIZE_CACHING=1` Environment variable
 
-```sh
-[Metrics]
-Nickname="fun"
-```
+This env var can be used with `lotus-storage-miner`, `lotus-seal-worker`, and `lotus-bench` to make the precommit1 step faster at the cost of some memory use (1x sector size)
+
+### `FIL_PROOFS_USE_GPU_COLUMN_BUILDER=1` Environment variable
+
+This env var can be used with `lotus-storage-miner`, `lotus-seal-worker`, and `lotus-bench` to enable experimental precommit2 GPU acceleration

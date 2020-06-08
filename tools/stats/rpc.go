@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/filecoin-project/go-jsonrpc"
+	"github.com/filecoin-project/specs-actors/actors/abi"
 	manet "github.com/multiformats/go-multiaddr-net"
 
 	"golang.org/x/xerrors"
@@ -15,7 +17,6 @@ import (
 	"github.com/filecoin-project/lotus/chain"
 	"github.com/filecoin-project/lotus/chain/store"
 	"github.com/filecoin-project/lotus/chain/types"
-	"github.com/filecoin-project/lotus/lib/jsonrpc"
 	"github.com/filecoin-project/lotus/node/repo"
 )
 
@@ -120,8 +121,10 @@ sync_complete:
 	}
 }
 
-func GetTips(ctx context.Context, api api.FullNode, lastHeight uint64) (<-chan *types.TipSet, error) {
+func GetTips(ctx context.Context, api api.FullNode, lastHeight abi.ChainEpoch, headlag int) (<-chan *types.TipSet, error) {
 	chmain := make(chan *types.TipSet)
+
+	hb := NewHeadBuffer(headlag)
 
 	notif, err := api.ChainNotify(ctx)
 	if err != nil {
@@ -151,15 +154,21 @@ func GetTips(ctx context.Context, api api.FullNode, lastHeight uint64) (<-chan *
 							chmain <- tipset
 						}
 					case store.HCApply:
-						chmain <- change.Val
+						if out := hb.Push(change); out != nil {
+							chmain <- out.Val
+						}
+					case store.HCRevert:
+						hb.Pop()
 					}
 				}
 			case <-ping:
 				log.Info("Running health check")
 
 				cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+
 				if _, err := api.ID(cctx); err != nil {
 					log.Error("Health check failed")
+					cancel()
 					return
 				}
 
@@ -175,7 +184,7 @@ func GetTips(ctx context.Context, api api.FullNode, lastHeight uint64) (<-chan *
 	return chmain, nil
 }
 
-func loadTipsets(ctx context.Context, api api.FullNode, curr *types.TipSet, lowestHeight uint64) ([]*types.TipSet, error) {
+func loadTipsets(ctx context.Context, api api.FullNode, curr *types.TipSet, lowestHeight abi.ChainEpoch) ([]*types.TipSet, error) {
 	tipsets := []*types.TipSet{}
 	for {
 		if curr.Height() == 0 {

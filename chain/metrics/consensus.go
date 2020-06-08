@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/filecoin-project/specs-actors/actors/abi"
 	"github.com/ipfs/go-cid"
 	logging "github.com/ipfs/go-log/v2"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -68,7 +69,7 @@ type message struct {
 	// TipSet
 	Cids   []cid.Cid
 	Blocks []*types.BlockHeader
-	Height uint64
+	Height abi.ChainEpoch
 	Weight types.BigInt
 	Time   uint64
 	Nonce  uint64
@@ -95,7 +96,7 @@ func sendHeadNotifs(ctx context.Context, ps *pubsub.PubSub, topic string, chain 
 		case notif := <-notifs:
 			n := notif[len(notif)-1]
 
-			w, err := chain.ChainTipSetWeight(ctx, n.Val)
+			w, err := chain.ChainTipSetWeight(ctx, n.Val.Key())
 			if err != nil {
 				return err
 			}

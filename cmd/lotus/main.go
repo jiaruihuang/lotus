@@ -10,8 +10,8 @@ import (
 	"github.com/filecoin-project/lotus/build"
 	lcli "github.com/filecoin-project/lotus/cli"
 	"github.com/filecoin-project/lotus/lib/lotuslog"
+	"github.com/filecoin-project/lotus/lib/tracing"
 	"github.com/filecoin-project/lotus/node/repo"
-	"github.com/filecoin-project/lotus/tracing"
 )
 
 var AdvanceBlockCmd *cli.Command
@@ -50,9 +50,10 @@ func main() {
 	defer span.End()
 
 	app := &cli.App{
-		Name:    "lotus",
-		Usage:   "Filecoin decentralized storage network client",
-		Version: build.UserVersion,
+		Name:                  "lotus",
+		Usage:                 "Filecoin decentralized storage network client",
+		Version:               build.UserVersion,
+		EnableShellCompletion: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "repo",
@@ -73,7 +74,12 @@ func main() {
 			Code:    trace.StatusCodeFailedPrecondition,
 			Message: err.Error(),
 		})
-		log.Warnf("%+v", err)
+		_, ok := err.(*lcli.ErrCmdFailed)
+		if ok {
+			log.Debugf("%+v", err)
+		} else {
+			log.Warnf("%+v", err)
+		}
 		os.Exit(1)
 	}
 }

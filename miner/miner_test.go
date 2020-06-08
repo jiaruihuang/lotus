@@ -23,64 +23,64 @@ func TestMessageFiltering(t *testing.T) {
 	a2 := mustIDAddr(2)
 
 	actors := map[address.Address]*types.Actor{
-		a1: &types.Actor{
+		a1: {
 			Nonce:   3,
 			Balance: types.NewInt(1200),
 		},
-		a2: &types.Actor{
+		a2: {
 			Nonce:   1,
 			Balance: types.NewInt(1000),
 		},
 	}
 
-	af := func(ctx context.Context, addr address.Address, ts *types.TipSet) (*types.Actor, error) {
+	af := func(ctx context.Context, addr address.Address, tsk types.TipSetKey) (*types.Actor, error) {
 		return actors[addr], nil
 	}
 
 	msgs := []types.Message{
-		types.Message{
+		{
 			From:     a1,
 			To:       a1,
 			Nonce:    3,
 			Value:    types.NewInt(500),
-			GasLimit: types.NewInt(50),
+			GasLimit: 50,
 			GasPrice: types.NewInt(1),
 		},
-		types.Message{
+		{
 			From:     a1,
 			To:       a1,
 			Nonce:    4,
 			Value:    types.NewInt(500),
-			GasLimit: types.NewInt(50),
+			GasLimit: 50,
 			GasPrice: types.NewInt(1),
 		},
-		types.Message{
+		{
 			From:     a2,
 			To:       a1,
 			Nonce:    1,
 			Value:    types.NewInt(800),
-			GasLimit: types.NewInt(100),
+			GasLimit: 100,
 			GasPrice: types.NewInt(1),
 		},
-		types.Message{
+		{
 			From:     a2,
 			To:       a1,
 			Nonce:    0,
 			Value:    types.NewInt(800),
-			GasLimit: types.NewInt(100),
+			GasLimit: 100,
 			GasPrice: types.NewInt(1),
 		},
-		types.Message{
+		{
 			From:     a2,
 			To:       a1,
 			Nonce:    2,
 			Value:    types.NewInt(150),
-			GasLimit: types.NewInt(100),
+			GasLimit: (100),
 			GasPrice: types.NewInt(1),
 		},
 	}
 
-	outmsgs, err := SelectMessages(ctx, af, nil, wrapMsgs(msgs))
+	outmsgs, err := SelectMessages(ctx, af, &types.TipSet{}, wrapMsgs(msgs))
 	if err != nil {
 		t.Fatal(err)
 	}

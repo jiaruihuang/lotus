@@ -8,8 +8,12 @@ import (
 	"math"
 	"sync"
 
+	"github.com/filecoin-project/specs-actors/actors/builtin"
+	"github.com/filecoin-project/specs-actors/actors/builtin/miner"
+
 	"github.com/filecoin-project/go-address"
-	actors2 "github.com/filecoin-project/lotus/chain/actors"
+	"github.com/filecoin-project/specs-actors/actors/abi"
+	"github.com/filecoin-project/specs-actors/actors/abi/big"
 
 	"github.com/ipfs/go-cid"
 
@@ -18,9 +22,7 @@ import (
 	"github.com/filecoin-project/lotus/chain/types"
 )
 
-const maxBatch = 3000
-
-func runSyncer(ctx context.Context, api api.FullNode, st *storage) {
+func runSyncer(ctx context.Context, api api.FullNode, st *storage, maxBatch int) {
 	notifs, err := api.ChainNotify(ctx)
 	if err != nil {
 		panic(err)
@@ -32,7 +34,7 @@ func runSyncer(ctx context.Context, api api.FullNode, st *storage) {
 				case store.HCCurrent:
 					fallthrough
 				case store.HCApply:
-					syncHead(ctx, api, st, change.Val)
+					syncHead(ctx, api, st, change.Val, maxBatch)
 				case store.HCRevert:
 					log.Warnf("revert todo")
 				}
@@ -41,7 +43,6 @@ func runSyncer(ctx context.Context, api api.FullNode, st *storage) {
 					go subMpool(ctx, api, st)
 					go subBlocks(ctx, api, st)
 				}
-
 			}
 		}
 	}()
@@ -54,9 +55,10 @@ type minerKey struct {
 }
 
 type minerInfo struct {
-	state actors2.StorageMinerActorState
-	info  actors2.MinerInfo
+	state miner.State
+	info  miner.MinerInfo
 
+	power big.Int
 	ssize uint64
 	psize uint64
 }
@@ -66,9 +68,7 @@ type actorInfo struct {
 	state     string
 }
 
-func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipSet) {
-	addresses := map[address.Address]address.Address{}
-	actors := map[address.Address]map[types.Actor]actorInfo{}
+func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipSet, maxBatch int) {
 	var alk sync.Mutex
 
 	log.Infof("Getting synced block list")
@@ -93,7 +93,6 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 		}
 
 		allToSync[bh.Cid()] = bh
-		addresses[bh.Miner] = address.Undef
 
 		if len(allToSync)%500 == 10 {
 			log.Infof("todo: (%d) %s @%d", len(allToSync), bh.Cid(), bh.Height)
@@ -115,7 +114,9 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 	}
 
 	for len(allToSync) > 0 {
-		minH := uint64(math.MaxUint64)
+		actors := map[address.Address]map[types.Actor]actorInfo{}
+		addresses := map[address.Address]address.Address{}
+		minH := abi.ChainEpoch(math.MaxInt64)
 
 		for _, header := range allToSync {
 			if header.Height < minH {
@@ -125,8 +126,9 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 
 		toSync := map[cid.Cid]*types.BlockHeader{}
 		for c, header := range allToSync {
-			if header.Height < minH+maxBatch {
+			if header.Height < minH+abi.ChainEpoch(maxBatch) {
 				toSync[c] = header
+				addresses[header.Miner] = address.Undef
 			}
 		}
 		for c := range toSync {
@@ -144,19 +146,19 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 
 			if len(bh.Parents) == 0 { // genesis case
 				ts, err := types.NewTipSet([]*types.BlockHeader{bh})
-				aadrs, err := api.StateListActors(ctx, ts)
+				aadrs, err := api.StateListActors(ctx, ts.Key())
 				if err != nil {
 					log.Error(err)
 					return
 				}
 
 				par(50, aadrs, func(addr address.Address) {
-					act, err := api.StateGetActor(ctx, addr, ts)
+					act, err := api.StateGetActor(ctx, addr, ts.Key())
 					if err != nil {
 						log.Error(err)
 						return
 					}
-					ast, err := api.StateReadState(ctx, act, ts)
+					ast, err := api.StateReadState(ctx, act, ts.Key())
 					if err != nil {
 						log.Error(err)
 						return
@@ -201,7 +203,7 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 					log.Error(err)
 					return
 				}
-				ast, err := api.StateReadState(ctx, &act, ts)
+				ast, err := api.StateReadState(ctx, &act, pts.Key())
 				if err != nil {
 					log.Error(err)
 					return
@@ -238,7 +240,7 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 		}
 
 		par(50, kmaparr(addresses), func(addr address.Address) {
-			raddr, err := api.StateLookupID(ctx, addr, nil)
+			raddr, err := api.StateLookupID(ctx, addr, types.EmptyTSK)
 			if err != nil {
 				log.Warn(err)
 				return
@@ -254,7 +256,7 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 
 		for addr, m := range actors {
 			for actor, c := range m {
-				if !(actor.Code == actors2.StorageMinerCodeCid || actor.Code == actors2.StorageMiner2CodeCid) {
+				if actor.Code != builtin.StorageMinerActorCodeID {
 					continue
 				}
 
@@ -269,7 +271,14 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 		par(50, kvmaparr(miners), func(it func() (minerKey, *minerInfo)) {
 			k, info := it()
 
-			sszs, err := api.StateMinerSectorCount(ctx, k.addr, nil)
+			pow, err := api.StateMinerPower(ctx, k.addr, types.EmptyTSK)
+			if err != nil {
+				log.Error(err)
+				// Not sure why this would fail, but its probably worth continuing
+			}
+			info.power = pow.MinerPower.QualityAdjPower
+
+			sszs, err := api.StateMinerSectorCount(ctx, k.addr, types.EmptyTSK)
 			if err != nil {
 				log.Error(err)
 				return
@@ -288,16 +297,7 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 				return
 			}
 
-			ib, err := api.ChainReadObj(ctx, info.state.Info)
-			if err != nil {
-				log.Error(err)
-				return
-			}
-
-			if err := info.info.UnmarshalCBOR(bytes.NewReader(ib)); err != nil {
-				log.Error(err)
-				return
-			}
+			info.info = info.state.Info
 		})
 
 		log.Info("Getting receipts")
@@ -358,7 +358,7 @@ func syncHead(ctx context.Context, api api.FullNode, st *storage, ts *types.TipS
 	log.Infof("Get deals")
 
 	// TODO: incremental, gather expired
-	deals, err := api.StateMarketDeals(ctx, ts)
+	deals, err := api.StateMarketDeals(ctx, ts.Key())
 	if err != nil {
 		log.Error(err)
 		return

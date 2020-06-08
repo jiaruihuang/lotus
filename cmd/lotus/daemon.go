@@ -4,14 +4,23 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"runtime/pprof"
+	"strings"
+
+	"github.com/filecoin-project/lotus/chain/types"
 
 	paramfetch "github.com/filecoin-project/go-paramfetch"
-	"github.com/filecoin-project/go-sectorbuilder"
 	blockstore "github.com/ipfs/go-ipfs-blockstore"
+	"github.com/mitchellh/go-homedir"
 	"github.com/multiformats/go-multiaddr"
+	"go.opencensus.io/stats"
+	"go.opencensus.io/stats/view"
+	"go.opencensus.io/tag"
 	"golang.org/x/xerrors"
 	"gopkg.in/urfave/cli.v2"
 
@@ -20,17 +29,41 @@ import (
 	"github.com/filecoin-project/lotus/chain/stmgr"
 	"github.com/filecoin-project/lotus/chain/store"
 	"github.com/filecoin-project/lotus/chain/vm"
+	lcli "github.com/filecoin-project/lotus/cli"
+	"github.com/filecoin-project/lotus/lib/peermgr"
+	"github.com/filecoin-project/lotus/metrics"
 	"github.com/filecoin-project/lotus/node"
 	"github.com/filecoin-project/lotus/node/modules"
+	"github.com/filecoin-project/lotus/node/modules/dtypes"
 	"github.com/filecoin-project/lotus/node/modules/testing"
 	"github.com/filecoin-project/lotus/node/repo"
-	"github.com/filecoin-project/lotus/peermgr"
+	"github.com/filecoin-project/sector-storage/ffiwrapper"
 )
 
 const (
-	makeGenFlag          = "lotus-make-random-genesis"
-	preSealedSectorsFlag = "genesis-presealed-sectors"
+	makeGenFlag     = "lotus-make-genesis"
+	preTemplateFlag = "genesis-template"
 )
+
+var daemonStopCmd = &cli.Command{
+	Name:  "stop",
+	Usage: "Stop a running lotus daemon",
+	Flags: []cli.Flag{},
+	Action: func(cctx *cli.Context) error {
+		api, closer, err := lcli.GetAPI(cctx)
+		if err != nil {
+			return err
+		}
+		defer closer()
+
+		err = api.Shutdown(lcli.ReqContext(cctx))
+		if err != nil {
+			return err
+		}
+
+		return nil
+	},
+}
 
 // DaemonCmd is the `go-lotus daemon` command
 var DaemonCmd = &cli.Command{
@@ -47,17 +80,17 @@ var DaemonCmd = &cli.Command{
 			Hidden: true,
 		},
 		&cli.StringFlag{
-			Name:   preSealedSectorsFlag,
+			Name:   preTemplateFlag,
+			Hidden: true,
+		},
+		&cli.StringFlag{
+			Name:   "import-key",
+			Usage:  "on first run, import a default key from a given file",
 			Hidden: true,
 		},
 		&cli.StringFlag{
 			Name:  "genesis",
 			Usage: "genesis file to use for first node run",
-		},
-		&cli.StringFlag{
-			Name:   "genesis-timestamp",
-			Hidden: true,
-			Usage:  "set the timestamp for the genesis block that will be created",
 		},
 		&cli.BoolFlag{
 			Name:  "bootstrap",
@@ -75,6 +108,10 @@ var DaemonCmd = &cli.Command{
 			Name:  "pprof",
 			Usage: "specify name of file for writing cpu profile to",
 		},
+		&cli.StringFlag{
+			Name:  "profile",
+			Usage: "specify type of node",
+		},
 	},
 	Action: func(cctx *cli.Context) error {
 		if prof := cctx.String("pprof"); prof != "" {
@@ -89,8 +126,26 @@ var DaemonCmd = &cli.Command{
 			defer pprof.StopCPUProfile()
 		}
 
-		ctx := context.Background()
-		log.Infof("lotus repo: %s", cctx.String("repo"))
+		var isBootstrapper dtypes.Bootstrapper
+		switch profile := cctx.String("profile"); profile {
+		case "bootstrapper":
+			isBootstrapper = true
+		case "":
+			// do nothing
+		default:
+			return fmt.Errorf("unrecognized profile type: %q", profile)
+		}
+
+		ctx, _ := tag.New(context.Background(), tag.Insert(metrics.Version, build.BuildVersion), tag.Insert(metrics.Commit, build.CurrentCommit))
+		{
+			dir, err := homedir.Expand(cctx.String("repo"))
+			if err != nil {
+				log.Warnw("could not expand repo location", "error", err)
+			} else {
+				log.Infof("lotus repo: %s", dir)
+			}
+		}
+
 		r, err := repo.NewFS(cctx.String("repo"))
 		if err != nil {
 			return xerrors.Errorf("opening fs repo: %w", err)
@@ -100,17 +155,18 @@ var DaemonCmd = &cli.Command{
 			return xerrors.Errorf("repo init error: %w", err)
 		}
 
-		if err := paramfetch.GetParams(build.ParametersJson(), 0); err != nil {
+		if err := paramfetch.GetParams(lcli.ReqContext(cctx), build.ParametersJson(), 0); err != nil {
 			return xerrors.Errorf("fetching proof parameters: %w", err)
 		}
 
-		genBytes := build.MaybeGenesis()
-
+		var genBytes []byte
 		if cctx.String("genesis") != "" {
 			genBytes, err = ioutil.ReadFile(cctx.String("genesis"))
 			if err != nil {
 				return xerrors.Errorf("reading genesis: %w", err)
 			}
+		} else {
+			genBytes = build.MaybeGenesis()
 		}
 
 		chainfile := cctx.String("import-chain")
@@ -119,6 +175,7 @@ var DaemonCmd = &cli.Command{
 				return err
 			}
 			if cctx.Bool("halt-after-import") {
+				fmt.Println("Chain import complete, halting as requested...")
 				return nil
 			}
 		}
@@ -128,17 +185,21 @@ var DaemonCmd = &cli.Command{
 			genesis = node.Override(new(modules.Genesis), modules.LoadGenesis(genBytes))
 		}
 		if cctx.String(makeGenFlag) != "" {
-			if cctx.String(preSealedSectorsFlag) == "" {
-				return xerrors.Errorf("must also pass file with miner preseal info to `--%s`", preSealedSectorsFlag)
+			if cctx.String(preTemplateFlag) == "" {
+				return xerrors.Errorf("must also pass file with genesis template to `--%s`", preTemplateFlag)
 			}
-			genesis = node.Override(new(modules.Genesis), testing.MakeGenesis(cctx.String(makeGenFlag), cctx.String(preSealedSectorsFlag), cctx.String("genesis-timestamp")))
+			genesis = node.Override(new(modules.Genesis), testing.MakeGenesis(cctx.String(makeGenFlag), cctx.String(preTemplateFlag)))
 		}
+
+		shutdownChan := make(chan struct{})
 
 		var api api.FullNode
 
 		stop, err := node.New(ctx,
 			node.FullAPI(&api),
 
+			node.Override(new(dtypes.Bootstrapper), isBootstrapper),
+			node.Override(new(dtypes.ShutdownChan), shutdownChan),
 			node.Online(),
 			node.Repo(r),
 
@@ -162,14 +223,67 @@ var DaemonCmd = &cli.Command{
 			return xerrors.Errorf("initializing node: %w", err)
 		}
 
+		if cctx.String("import-key") != "" {
+			if err := importKey(ctx, api, cctx.String("import-key")); err != nil {
+				log.Errorf("importing key failed: %+v", err)
+			}
+		}
+
+		// Register all metric views
+		if err = view.Register(
+			metrics.DefaultViews...,
+		); err != nil {
+			log.Fatalf("Cannot register the view: %v", err)
+		}
+
+		// Set the metric to one so it is published to the exporter
+		stats.Record(ctx, metrics.LotusInfo.M(1))
+
 		endpoint, err := r.APIEndpoint()
 		if err != nil {
 			return xerrors.Errorf("getting api endpoint: %w", err)
 		}
 
 		// TODO: properly parse api endpoint (or make it a URL)
-		return serveRPC(api, stop, endpoint)
+		return serveRPC(api, stop, endpoint, shutdownChan)
 	},
+	Subcommands: []*cli.Command{
+		daemonStopCmd,
+	},
+}
+
+func importKey(ctx context.Context, api api.FullNode, f string) error {
+	f, err := homedir.Expand(f)
+	if err != nil {
+		return err
+	}
+
+	hexdata, err := ioutil.ReadFile(f)
+	if err != nil {
+		return err
+	}
+
+	data, err := hex.DecodeString(strings.TrimSpace(string(hexdata)))
+	if err != nil {
+		return err
+	}
+
+	var ki types.KeyInfo
+	if err := json.Unmarshal(data, &ki); err != nil {
+		return err
+	}
+
+	addr, err := api.WalletImport(ctx, &ki)
+	if err != nil {
+		return err
+	}
+
+	if err := api.WalletSetDefault(ctx, addr); err != nil {
+		return err
+	}
+
+	log.Info("successfully imported key for %s", addr)
+	return nil
 }
 
 func ImportChain(r repo.Repo, fname string) error {
@@ -196,7 +310,7 @@ func ImportChain(r repo.Repo, fname string) error {
 
 	bs := blockstore.NewBlockstore(ds)
 
-	cst := store.NewChainStore(bs, mds, vm.Syscalls(sectorbuilder.ProofVerifier))
+	cst := store.NewChainStore(bs, mds, vm.Syscalls(ffiwrapper.ProofVerifier))
 
 	log.Info("importing chain from file...")
 	ts, err := cst.Import(fi)

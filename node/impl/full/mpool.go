@@ -24,7 +24,11 @@ type MpoolAPI struct {
 	Mpool *messagepool.MessagePool
 }
 
-func (a *MpoolAPI) MpoolPending(ctx context.Context, ts *types.TipSet) ([]*types.SignedMessage, error) {
+func (a *MpoolAPI) MpoolPending(ctx context.Context, tsk types.TipSetKey) ([]*types.SignedMessage, error) {
+	ts, err := a.Chain.GetTipSetFromKey(tsk)
+	if err != nil {
+		return nil, xerrors.Errorf("loading tipset %s: %w", tsk, err)
+	}
 	pending, mpts := a.Mpool.Pending()
 
 	haveCids := map[cid.Cid]struct{}{}
@@ -87,8 +91,12 @@ func (a *MpoolAPI) MpoolPushMessage(ctx context.Context, msg *types.Message) (*t
 		return nil, xerrors.Errorf("MpoolPushMessage expects message nonce to be 0, was %d", msg.Nonce)
 	}
 
-	return a.Mpool.PushWithNonce(msg.From, func(nonce uint64) (*types.SignedMessage, error) {
+	return a.Mpool.PushWithNonce(ctx, msg.From, func(from address.Address, nonce uint64) (*types.SignedMessage, error) {
 		msg.Nonce = nonce
+		if msg.From.Protocol() == address.ID {
+			log.Warnf("Push from ID address (%s), adjusting to %s", msg.From, from)
+			msg.From = from
+		}
 
 		b, err := a.WalletBalance(ctx, msg.From)
 		if err != nil {
@@ -99,7 +107,7 @@ func (a *MpoolAPI) MpoolPushMessage(ctx context.Context, msg *types.Message) (*t
 			return nil, xerrors.Errorf("mpool push: not enough funds: %s < %s", b, msg.Value)
 		}
 
-		return a.WalletSignMessage(ctx, msg.From, msg)
+		return a.WalletSignMessage(ctx, from, msg)
 	})
 }
 
@@ -109,4 +117,8 @@ func (a *MpoolAPI) MpoolGetNonce(ctx context.Context, addr address.Address) (uin
 
 func (a *MpoolAPI) MpoolSub(ctx context.Context) (<-chan api.MpoolUpdate, error) {
 	return a.Mpool.Updates(ctx)
+}
+
+func (a *MpoolAPI) MpoolEstimateGasPrice(ctx context.Context, nblocksincl uint64, sender address.Address, gaslimit int64, tsk types.TipSetKey) (types.BigInt, error) {
+	return a.Mpool.EstimateGasPrice(ctx, nblocksincl, sender, gaslimit, tsk)
 }
